@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=1024, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Button Blocks with Progress Dial, Pressure, and Status</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script> <!-- Chart.js Library -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.min.js"></script> <!-- Socket.IO Library -->
+  <style>
+    body, html {
+      width: 1024px;
+      height: 600px;
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      background-image: url('/background.jpg');
+      background-size: cover;
+      background-position: center;
+      background-repeat: no-repeat;
+    }
+
+    .container {
+      display: flex;
+      width: 1024px;
+      height: 360px;
+      background-color: rgba(240, 240, 240, 0.9);
+    }
+
+    .new-container {
+      width: 1024px;
+      height: 240px;
+      background-color: rgba(51, 51, 51, 0.7);
+      color: white;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 24px;
+      position: relative;
+    }
+
+    #pressureChart {
+      width: 100%;
+      height: 100%;
+    }
+
+    .block {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: flex-start;
+      border: 1px solid #333;
+      padding-top: 20px;
+      position: relative;
+    }
+
+    .block:nth-child(1) { background-color: #F7AA00; }
+    .block:nth-child(2) { background-color: #235784; }
+    .block:nth-child(3) { background-color: #40A8C4; }
+    .block:nth-child(4) { background-color: #EEF6F7; }
+
+    .info-row {
+      text-align: center;
+      font-size: 18px;
+      font-weight: bold;
+    }
+    .status {
+      font-size: 16px;
+      color: #555;
+    }
+    hr {
+      width: 80%;
+      border: none;
+      border-top: 1px solid #333;
+      margin: 8px 0;
+    }
+
+    .progress-dial {
+      position: relative;
+      width: 120px;
+      height: 120px;
+      border-radius: 50%;
+      background: conic-gradient(#4caf50 0%, #ccc 0%);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin-top: 10px;
+    }
+    .progress-dial-inner {
+      position: absolute;
+      width: 90px;
+      height: 90px;
+      border-radius: 50%;
+      background-color: white;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      font-size: 16px;
+      font-weight: bold;
+    }
+    .pressure-info {
+      font-size: 10px;
+      font-weight: normal;
+      margin-top: 5px;
+    }
+
+    .button-container {
+      display: flex;
+      gap: 10px;
+      margin-top: 15px;
+    }
+
+    .button {
+      padding: 11px 22px;
+      font-size: 17.6px;
+      cursor: pointer;
+      border: none;
+      color: white;
+      border-radius: 5px;
+      transition: background-color 0.3s ease, transform 0.1s ease;
+    }
+
+    .start-btn { background-color: #28a745; }
+    .stop-btn { background-color: #dc3545; }
+    .seal-btn {
+      background-color: #007bff;
+      font-size: 12px;
+      padding: 5px 10px;
+      position: absolute;
+      bottom: 10px;
+      right: 10px;
+    }
+
+    .button:disabled {
+      background-color: #ccc;
+      cursor: not-allowed;
+    }
+
+    .start-btn:hover:enabled { background-color: #218838; }
+    .stop-btn:hover:enabled { background-color: #c82333; }
+    .seal-btn:hover:enabled { background-color: #0056b3; }
+
+    .button:active {
+      transform: scale(0.95);
+      opacity: 0.85;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <!-- Repeat for each bay (Block 1 to Block 4) -->
+    ${[1, 2, 3, 4].map(i => `
+    <div class="block">
+      <div class="info-row">Bay Number: ${i}</div>
+      <hr />
+      <div class="info-row status" id="status${i}">Status: Idle</div>
+      <hr />
+      <div class="progress-dial" id="progressDial${i}">
+        <div class="progress-dial-inner" id="progressValue${i}">0%
+          <div class="pressure-info" id="pressure${i}">Pressure 1: 0</div>
+          <div class="pressure-info">Pressure 2: 0</div>
+        </div>
+      </div>
+      <div class="button-container">
+        <button class="button start-btn" onclick="startProgress(${i}); startPomp(${i})">Start</button>
+        <button class="button stop-btn" onclick="stopProgress(${i})">Stop</button>
+      </div>
+      <button class="button seal-btn" onclick="setTime(${i})">Set Time</button>
+    </div>`).join('')}
+  </div>
+
+  <div class="new-container">
+    <canvas id="pressureChart"></canvas>
+  </div>
+
+  <script>
+    let switchActive = false;
+    let socket;
+    let progressIntervals = [null, null, null, null];
+    let progressTimes = [10, 10, 10, 10];
+    let chart;
+    let pressures = [0, 0, 0, 0];
+
+    function connectSocket() {
+      socket = io('http://127.0.0.1:5005');
+
+      socket.on('connect', () => {
+        console.log("Connected to Flask server");
+        socket.emit('get_switch_status');
+      });
+
+      setTimeout(() => {
+        if (!switchActive) updateUIForSwitchStatus();
+      }, 3000);
+
+      socket.on('switch_status', (data) => {
+        switchActive = data.status === 'enabled';
+        updateUIForSwitchStatus();
+      });
+
+      socket.on('server_response', (data) => {
+        const buttonId = data.button_id;
+        document.getElementById(`status${buttonId}`).textContent = data.message;
+      });
+
+      socket.on('pressure_sensor_reading_1', (data) => {
+        pressures[0] = parseFloat(data.message);
+        document.getElementById('pressure1').textContent = `Pressure 1: ${pressures[0]}`;
+      });
+
+      socket.on('disconnect', () => {
+        console.log("Disconnected from server");
+      });
+    }
+
+    function updateUIForSwitchStatus() {
+      document.querySelectorAll('.start-btn').forEach(button => {
+        button.disabled = !switchActive;
+      });
+      document.querySelectorAll('.status').forEach(status => {
+        status.textContent = switchActive ? "Status: Idle" : "Status: Install cartridge";
+      });
+    }
+
+    function createChart() {
+      const ctx = document.getElementById('pressureChart').getContext('2d');
+      chart = new Chart(ctx, {
+        type: 'line',
+        data: {
+          labels: Array.from({ length: 10 }, (_, i) => i + 1),
+          datasets: [
+            { label: 'Bay 1 Pressure', data: [], borderColor: '#F7AA00', fill: false },
+            { label: 'Bay 2 Pressure', data: [], borderColor: '#235784', fill: false },
+            { label: 'Bay 3 Pressure', data: [], borderColor: '#40A8C4', fill: false },
+            { label: 'Bay 4 Pressure', data: [], borderColor: '#EEF6F7', fill: false }
+          ]
+        },
+        options: {
+          responsive: true,
+          scales: { y: { beginAtZero: true } }
+        }
+      });
+    }
+
+    function updateChart(bayId, pressure) {
+      chart.data.datasets[bayId - 1].data.push(pressure);
+      if (chart.data.datasets[bayId - 1].data.length > 10) {
+        chart.data.datasets[bayId - 1].data.shift();
+      }
+      chart.update();
+    }
+
+    function setTime(blockId) {
+      const time = prompt("Enter time (seconds):");
+      if (time && !isNaN(time)) progressTimes[blockId - 1] = parseInt(time);
+    }
+
+    function startPomp(blockId) {
+      socket.emit("start_pomp", { button_id: blockId });
+    }
+
+    function startProgress(blockId) {
+      let progress = 0;
+      const progressElement = document.getElementById(`progressDial${blockId}`);
+      const valueElement = document.getElementById(`progressValue${blockId}`);
+      const intervalDuration = (progressTimes[blockId - 1] * 1000) / 100;
+
+      progressIntervals[blockId - 1] = setInterval(() => {
+        if (progress >= 100) stopProgress(blockId);
+        progress++;
+        progressElement.style.background = `conic-gradient(#4caf50 ${progress * 3.6}deg, #ccc 0deg)`;
+        valueElement.textContent = `${progress}%`;
+      }, intervalDuration);
+    }
+
+    function stopProgress(blockId) {
+      clearInterval(progressIntervals[blockId - 1]);
+      progressIntervals[blockId - 1] = null;
+      document.getElementById(`progressDial${blockId}`).style.background = `conic-gradient(#4caf50 0%, #ccc 0%)`;
+      document.getElementById(`progressValue${blockId}`).textContent = '0%';
+    }
+
+    connectSocket();
+    createChart();
+  </script>
+</body>
+</html>
